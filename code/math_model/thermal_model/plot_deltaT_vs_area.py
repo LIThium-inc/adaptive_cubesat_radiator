@@ -4,54 +4,67 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import thermal_model.parameters as par  # type: ignore
+import thermal_model.thermal_funcs as tf  # type: ignore
+
+EPS_MIN = par.epsilon_eff_min   # радиатор "закрыт" (минимальное достижимое ε_eff)
+EPS_MAX = par.epsilon_eff_max   # радиатор "открыт" (максимальное достижимое ε_eff)
+
+# Площадь радиатора, м^2 (логарифмическая сетка)
+S = np.logspace(-4, math.log10(0.5), 400)
+
+# Характерные площади одной грани 3U: торец 10x10 см и боковая грань 10x30 см
+S_MARKS = {0.01: "торец", 0.03: "боковая грань"}
+
+SIDE_STYLE = {"sun": ("-", "Солнце"), "earth": ("--", "Земля")}
 
 
-def T_hot_S(S_rad, epsilon_eff):
-    """T_hot для заданной площади радиатора S_rad (м^2).
-
-    Та же формула, что в T_hot_epsilon, но S_rad передаётся аргументом,
-    а не берётся из par.S_rad.
-    """
-    A_eff = par.A_eff_at_max + par.c * (epsilon_eff - par.epsilon_eff_max)
-    Q_in = (par.q * (S_rad * A_eff + par.C_)
-            + par.Q_hot_refl + par.Q_earth + par.Q_hot_internal)
-    return math.pow(Q_in / (par.sigma * (S_rad * epsilon_eff + par.C)), 0.25)
+def to_C(T_kelvin):
+    return T_kelvin - 273.15
 
 
-EPS_CLOSED = par.epsilon_eff_min  # радиатор "закрыт" (минимальное достижимое ε_eff)
-EPS_OPEN = par.epsilon_eff_max    # радиатор "открыт" (максимальное достижимое ε_eff)
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
 
-# Площадь радиатора: от 1 см^2 до 5 м^2 (логарифмическая сетка)
-S_values = np.logspace(-4, math.log10(5), 400)
+# --- График 1: T_hot в закрытом и открытом состоянии ---
+for side, (ls, side_name) in SIDE_STYLE.items():
+    ax1.plot(S, to_C(tf.T_hot_epsilon(EPS_MIN, S, side)), ls, color="tab:blue", linewidth=2,
+             label=f"ε = {EPS_MIN:.2f} (закрыт), радиатор на стороне: {side_name}")
+    ax1.plot(S, to_C(tf.T_hot_epsilon(EPS_MAX, S, side)), ls, color="tab:orange", linewidth=2,
+             label=f"ε = {EPS_MAX:.2f} (открыт), радиатор на стороне: {side_name}")
+ax1.set_ylabel("T_hot, °C")
+ax1.set_title("Горячий режим: температура в крайних состояниях радиатора")
+ax1.legend(fontsize=8)
 
-T_closed = np.array([T_hot_S(S, EPS_CLOSED) for S in S_values])
-T_open = np.array([T_hot_S(S, EPS_OPEN) for S in S_values])
-delta_T = T_closed - T_open
-
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
-
-# --- График 1: температуры в двух состояниях ---
-ax1.plot(S_values, T_closed - 273.15, label=f"T_hot, ε = {EPS_CLOSED} (закрыт)", linewidth=2)
-ax1.plot(S_values, T_open - 273.15, label=f"T_hot, ε = {EPS_OPEN} (открыт)", linewidth=2)
-ax1.set_ylabel("Температура, °C")
-ax1.set_title("Горячий режим: температура и ΔT в зависимости от площади радиатора")
-ax1.grid(True, which="both", linestyle="--", alpha=0.5)
-ax1.legend()
-
-# --- График 2: ΔT ---
-ax2.plot(S_values, delta_T, color="tab:red", linewidth=2,
-         label="ΔT = T_hot(ε_закр) − T_hot(ε_откр)")
-ax2.set_xlabel("Площадь радиатора S_rad, м²")
-ax2.set_ylabel("ΔT, К")
+# --- График 2: разность температур между крайними состояниями ---
+for side, (ls, side_name) in SIDE_STYLE.items():
+    dT_hot = tf.T_hot_epsilon(EPS_MIN, S, side) - tf.T_hot_epsilon(EPS_MAX, S, side)
+    dT_cold = tf.T_cold_epsilon(EPS_MIN, S, side) - tf.T_cold_epsilon(EPS_MAX, S, side)
+    ax2.plot(S, dT_hot, ls, color="tab:red", linewidth=2,
+             label=f"горячий режим, сторона: {side_name}")
+    ax2.plot(S, dT_cold, ls, color="tab:blue", linewidth=2,
+             label=f"холодный режим, сторона: {side_name}")
+ax2.axhline(0, color="black", linewidth=0.8)
 ax2.set_xscale("log")
-ax2.grid(True, which="both", linestyle="--", alpha=0.5)
-ax2.legend()
+ax2.set_xlabel("Площадь радиатора S_rad, м²")
+ax2.set_ylabel("ΔT = T(ε_закр) − T(ε_откр), К")
+ax2.set_title("Разность температур между закрытым и открытым состоянием "
+              "(знак минус: открытый радиатор теплее)")
+ax2.legend(fontsize=8)
 
-# Для ориентира: площадь всей поверхности 3U (~0.34 м^2)
 for ax in (ax1, ax2):
-    ax.axvline(0.34, color="gray", linestyle=":", linewidth=1)
-ax2.text(0.34, ax2.get_ylim()[1] * 0.95, " вся поверхность 3U",
-         color="gray", va="top")
+    ax.grid(True, which="both", linestyle="--", alpha=0.5)
+    for s_mark in S_MARKS:
+        ax.axvline(s_mark, color="gray", linestyle=":", linewidth=1)
+for s_mark, label in S_MARKS.items():
+    ax2.text(s_mark, 0.98, " " + label, transform=ax2.get_xaxis_transform(),
+             rotation=90, va="top", ha="right", fontsize=8, color="gray")
+
+print(f"Диапазон ε_eff: {EPS_MIN:.3f} … {EPS_MAX:.3f}")
+for s_mark, label in S_MARKS.items():
+    for side, (_, side_name) in SIDE_STYLE.items():
+        d_hot = float(tf.T_hot_epsilon(EPS_MIN, s_mark, side) - tf.T_hot_epsilon(EPS_MAX, s_mark, side))
+        d_cold = float(tf.T_cold_epsilon(EPS_MIN, s_mark, side) - tf.T_cold_epsilon(EPS_MAX, s_mark, side))
+        print(f"S = {s_mark} м² ({label}), сторона {side_name}: "
+              f"ΔT_hot = {d_hot:.1f} К, ΔT_cold = {d_cold:.1f} К")
 
 plt.tight_layout()
 plt.show()

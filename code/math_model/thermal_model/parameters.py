@@ -10,7 +10,7 @@ Albedo_earth = 0.3 #Albedo of earth
 S_rad = 0.008 #Area of radiator in m^2
 S_solar = 0.08 #Area of solar panel in m^2
 S_solar_earth = 0.024 #Area of solar panel facing earth in m^2
-S_solar_sun = 0.08 * 2 #Area of solar panel facing sun in m^2
+S_solar_sun = 0.016 #Area of solar panel facing sun in m^2
 S_end_pannels = 0.02 #Area of end pannels in m^2
 
 A_solar = 0.92 #Abbsorptivity of solar panel
@@ -58,3 +58,15 @@ C = K_ins * (S_solar * epsilon_solar + S_end_pannels * epsilon_end_pannels)
 C_ = S_solar_sun * A_solar
 
 G = Q_earth + Q_cold_internal
+
+RADIATOR_SIDE = "sun"   # "sun" - радиатор на солнечной стороне, "earth" - на стороне к Земле
+
+S_panel_one = 0.008   # Area of one solar panel (one face) in m^2
+
+# Число панелей, обращённых к Солнцу / к Земле, в зависимости от стороны радиатора
+N_PANELS_SUN   = {"sun": 2, "earth": 3}
+N_PANELS_EARTH = {"sun": 3, "earth": 2}
+
+# Удельные потоки от Земли на поверхность, обращённую к Земле, Вт/м^2
+q_earth_ir = phi * (1 - Albedo_earth) * q / 4    # собственное ИК Земли
+q_earth_alb = phi * Albedo_earth * q             # отражённый солнечный свет

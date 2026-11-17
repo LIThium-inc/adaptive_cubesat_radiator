@@ -2,33 +2,30 @@ import math
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.widgets import Slider
+from matplotlib.widgets import RadioButtons, Slider
 
 import thermal_model.parameters as par  # type: ignore
+import thermal_model.thermal_funcs as tf  # type: ignore
 
 # ====== Настройки ======
 T_MIN_INIT_C = 0.0     # начальное значение T_min, °C
 T_MAX_INIT_C = 50.0    # начальное значение T_max, °C
+SIDE_INIT = getattr(par, "RADIATOR_SIDE", "sun")   # "sun" или "earth"
 
-# Диапазон площадей радиатора, м^2
-S_MIN, S_MAX = 1e-3, 5.0
-N_POINTS = 800
+S_MIN, S_MAX = 1e-3, 0.5    # диапазон площадей радиатора, м^2
+N_POINTS = 600
+N_EPS = 150                 # число шагов по ε внутри диапазона [ε_min, ε_max]
 
-EPS_CLOSED = par.epsilon_eff_min  # радиатор "закрыт" (минимальное достижимое ε_eff)
-EPS_OPEN = par.epsilon_eff_max    # радиатор "открыт" (максимальное достижимое ε_eff)
+# Характерные площади одной грани 3U: торец 10x10 см и боковая грань 10x30 см
+S_MARKS = {0.01: "торец", 0.03: "боковая грань"}
 
+SIDE_LABELS = {"sun": "Солнце", "earth": "Земля"}
 
-def T_hot_S(S_rad, eps):
-    """Горячий режим, температура в К (работает с массивами numpy)."""
-    A_eff = par.A_eff_at_max + par.c * (eps - par.epsilon_eff_max)
-    Q_in = (par.q * (S_rad * A_eff + par.C_)
-            + par.Q_hot_refl + par.Q_earth + par.Q_hot_internal)
-    return (Q_in / (par.sigma * (S_rad * eps + par.C))) ** 0.25
+EPS_MIN = par.epsilon_eff_min   # радиатор "закрыт"
+EPS_MAX = par.epsilon_eff_max   # радиатор "открыт"
 
-
-def T_cold_S(S_rad, eps):
-    """Холодный режим, температура в К (Q_cold_internal уже включает нагреватель)."""
-    return (par.G / (par.sigma * (S_rad * eps + par.C))) ** 0.25
+S = np.logspace(math.log10(S_MIN), math.log10(S_MAX), N_POINTS)
+EPS = np.linspace(EPS_MIN, EPS_MAX, N_EPS)[:, None]   # строки: ε, столбцы: S
 
 
 def to_C(T_kelvin):
@@ -57,69 +54,87 @@ def format_intervals(mask, x):
     return "; ".join(f"{lo:.3g}…{hi:.3g} м²" for lo, hi in ivs)
 
 
-S = np.logspace(math.log10(S_MIN), math.log10(S_MAX), N_POINTS)
+# Температурные поля для каждой стороны считаются один раз:
+# строка - значение ε из диапазона, столбец - площадь радиатора.
+FIELDS = {}
+for _side in SIDE_LABELS:
+    T_hot = to_C(tf.T_hot_epsilon(EPS, S[None, :], _side))
+    T_cold = to_C(tf.T_cold_epsilon(EPS, S[None, :], _side))
+    cols = np.arange(S.size)
+    FIELDS[_side] = {
+        "T_hot": T_hot,
+        "T_cold": T_cold,
+        # Лучшее ε для каждого режима выбирается независимо (адаптивный радиатор)
+        "T_hot_best": T_hot.min(axis=0),
+        "T_cold_best": T_cold.max(axis=0),
+        # Отказ: радиатор остался в положении, оптимальном для холодного режима
+        "T_hot_fail": T_hot[T_cold.argmax(axis=0), cols],
+    }
 
-# Кривые, не зависящие от температурного окна
-T_hot_open = to_C(T_hot_S(S, EPS_OPEN))
-T_cold_closed = to_C(T_cold_S(S, EPS_CLOSED))
-T_hot_closed = to_C(T_hot_S(S, EPS_CLOSED))
 
-# Матрицы для поиска лучшего фиксированного ε (строки: ε, столбцы: S)
-eps_grid = np.linspace(EPS_CLOSED, EPS_OPEN, 100)
-T_hot_grid = to_C(T_hot_S(S[None, :], eps_grid[:, None]))
-T_cold_grid = to_C(T_cold_S(S[None, :], eps_grid[:, None]))
-
-
-def compute_masks(T_min_c, T_max_c):
-    adaptive_ok = (T_hot_open <= T_max_c) & (T_cold_closed >= T_min_c)
-    fixed_ok = ((T_hot_grid <= T_max_c) & (T_cold_grid >= T_min_c)).any(axis=0)
-    adaptive_needed = adaptive_ok & ~fixed_ok
-    return adaptive_ok, fixed_ok, adaptive_needed
+def compute_masks(side, T_min_c, T_max_c):
+    f = FIELDS[side]
+    hot_ok = f["T_hot"] <= T_max_c
+    cold_ok = f["T_cold"] >= T_min_c
+    adaptive_ok = hot_ok.any(axis=0) & cold_ok.any(axis=0)   # ε можно менять между режимами
+    fixed_ok = (hot_ok & cold_ok).any(axis=0)                # одно ε на оба режима
+    return adaptive_ok, fixed_ok, adaptive_ok & ~fixed_ok
 
 
 # ====== Построение ======
-fig, ax = plt.subplots(figsize=(11, 7.5))
-fig.subplots_adjust(bottom=0.30, top=0.93)
+fig, ax = plt.subplots(figsize=(12, 8))
+fig.subplots_adjust(bottom=0.32, top=0.93)
 
-ax.plot(S, T_hot_open, color="tab:blue", linewidth=2,
-        label=f"T_hot, ε = {EPS_OPEN} (открыт)")
-ax.plot(S, T_cold_closed, color="tab:orange", linewidth=2,
-        label=f"T_cold, ε = {EPS_CLOSED} (закрыт)")
-ax.plot(S, T_hot_closed, color="tab:red", linewidth=1.2, linestyle="--",
-        label=f"T_hot, ε = {EPS_CLOSED} (отказ в закрытом положении)")
-
-# Для ориентира: полная поверхность 3U
-ax.axvline(0.34, color="gray", linestyle=":", linewidth=1)
+(line_hot,) = ax.plot(S, FIELDS[SIDE_INIT]["T_hot_best"], color="tab:blue", linewidth=2)
+(line_cold,) = ax.plot(S, FIELDS[SIDE_INIT]["T_cold_best"], color="tab:orange", linewidth=2)
+(line_fail,) = ax.plot(S, FIELDS[SIDE_INIT]["T_hot_fail"], color="tab:red", linewidth=1.2,
+                       linestyle="--")
 
 ax.set_xscale("log")
 ax.set_xlabel("Площадь радиатора S_rad, м²")
 ax.set_ylabel("Температура, °C")
 ax.grid(True, which="both", linestyle="--", alpha=0.5)
+for s_mark, label in S_MARKS.items():
+    ax.axvline(s_mark, color="gray", linestyle=":", linewidth=1)
+    ax.text(s_mark, 0.02, " " + label, transform=ax.get_xaxis_transform(),
+            rotation=90, va="bottom", ha="right", fontsize=8, color="gray")
 
-# Фиксируем масштаб по Y по данным кривых, чтобы он не прыгал при движении ползунков
-y_lo = min(T_cold_closed.min(), T_hot_open.min(), -20.0)
-y_hi = max(T_hot_closed.max(), T_hot_open.max(), 60.0)
+# Масштаб по Y общий для обеих сторон, чтобы он не прыгал
+all_lo = min(min(f["T_cold_best"].min(), f["T_hot_best"].min()) for f in FIELDS.values())
+all_hi = max(max(f["T_hot_fail"].max(), f["T_hot_best"].max()) for f in FIELDS.values())
+y_lo, y_hi = min(all_lo, -20.0), max(all_hi, 60.0)
 pad = 0.05 * (y_hi - y_lo)
 ax.set_ylim(y_lo - pad, y_hi + pad)
-ax.text(0.34, y_hi + pad, " вся поверхность 3U", color="gray", va="top")
 
-# Элементы, которые перерисовываются при изменении слайдеров
-dynamic = {"hline_max": None, "hline_min": None, "band": None,
-           "ok": None, "needed": None}
+dynamic = {"hline_max": None, "hline_min": None, "band": None, "ok": None, "needed": None}
+state = {"side": SIDE_INIT}
 
-info_text = fig.text(0.5, 0.20, "", ha="center", va="center", fontsize=9)
+info_text = fig.text(0.64, 0.205, "", ha="center", va="center", fontsize=9)
 
-# ====== Слайдеры ======
-ax_tmin = fig.add_axes([0.15, 0.10, 0.70, 0.03])
-ax_tmax = fig.add_axes([0.15, 0.05, 0.70, 0.03])
+# ====== Элементы управления ======
+ax_radio = fig.add_axes([0.03, 0.03, 0.17, 0.15])
+ax_radio.set_title("Сторона радиатора", fontsize=9)
+radio = RadioButtons(ax_radio, list(SIDE_LABELS.values()),
+                     active=list(SIDE_LABELS).index(SIDE_INIT))
+
+ax_tmin = fig.add_axes([0.35, 0.10, 0.55, 0.03])
+ax_tmax = fig.add_axes([0.35, 0.05, 0.55, 0.03])
 slider_tmin = Slider(ax_tmin, "T_min, °C", -60.0, 20.0, valinit=T_MIN_INIT_C, valstep=1.0)
 slider_tmax = Slider(ax_tmax, "T_max, °C", 20.0, 120.0, valinit=T_MAX_INIT_C, valstep=1.0)
 
 
 def update(_=None):
-    T_min_c = slider_tmin.val
-    T_max_c = slider_tmax.val
-    adaptive_ok, fixed_ok, adaptive_needed = compute_masks(T_min_c, T_max_c)
+    side = state["side"]
+    f = FIELDS[side]
+    T_min_c, T_max_c = slider_tmin.val, slider_tmax.val
+    adaptive_ok, fixed_ok, adaptive_needed = compute_masks(side, T_min_c, T_max_c)
+
+    line_hot.set_ydata(f["T_hot_best"])
+    line_cold.set_ydata(f["T_cold_best"])
+    line_fail.set_ydata(f["T_hot_fail"])
+    line_hot.set_label(f"T_hot, лучшее ε ∈ [{EPS_MIN:.2f}, {EPS_MAX:.2f}]")
+    line_cold.set_label(f"T_cold, лучшее ε ∈ [{EPS_MIN:.2f}, {EPS_MAX:.2f}]")
+    line_fail.set_label("T_hot при отказе (радиатор в положении, оптимальном для холода)")
 
     for key, artist in dynamic.items():
         if artist is not None:
@@ -132,26 +147,29 @@ def update(_=None):
                                  label=f"Допуск объекта [{T_min_c:g}, {T_max_c:g}] °C")
     dynamic["ok"] = ax.fill_between(
         S, 0, 1, where=adaptive_ok, transform=ax.get_xaxis_transform(),
-        color="tab:green", alpha=0.18,
-        label="Адаптивный радиатор удовлетворяет допуску")
+        color="tab:green", alpha=0.18, label="Адаптивный радиатор удовлетворяет допуску")
     dynamic["needed"] = ax.fill_between(
         S, 0, 1, where=adaptive_needed, transform=ax.get_xaxis_transform(),
         facecolor="tab:green", alpha=0.25, hatch="//", edgecolor="green",
         label="... и фиксированное ε не удовлетворяет")
 
-    ax.set_title(f"Область применимости адаптивного радиатора: "
-                 f"допуск [{T_min_c:g}, {T_max_c:g}] °C")
-    ax.legend(loc="upper left", fontsize=9)
+    ax.set_title(f"Область применимости адаптивного радиатора, "
+                 f"сторона: {SIDE_LABELS[side]}, допуск [{T_min_c:g}, {T_max_c:g}] °C")
+    ax.legend(loc="upper left", fontsize=8)
 
     info_text.set_text(
         f"Адаптивный радиатор подходит: {format_intervals(adaptive_ok, S)}\n"
         f"Фиксированное ε подходит: {format_intervals(fixed_ok, S)}\n"
-        f"Адаптивность даёт выигрыш: {format_intervals(adaptive_needed, S)}"
-    )
-
+        f"Адаптивность даёт выигрыш: {format_intervals(adaptive_needed, S)}")
     fig.canvas.draw_idle()
 
 
+def on_side(label):
+    state["side"] = next(k for k, v in SIDE_LABELS.items() if v == label)
+    update()
+
+
+radio.on_clicked(on_side)
 slider_tmin.on_changed(update)
 slider_tmax.on_changed(update)
 update()
